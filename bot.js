@@ -1,4 +1,15 @@
 /**
- * Entry point forwarding to index.js
+ * Universal Entrypoint for Mochi Bot
+ * Supports:
+ *   - node bot.js
+ *   - ts-node --esm bot.js
  */
-require('./index.js');
+try {
+  require('./index.js');
+} catch (e) {
+  if (typeof require === 'undefined' || e.code === 'ERR_REQUIRE_ESM') {
+    import('./index.js');
+  } else {
+    throw e;
+  }
+}
