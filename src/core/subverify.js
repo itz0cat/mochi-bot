@@ -1,9 +1,10 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { spawn } = require('child_process');
+const crypto = require('crypto');
 const https = require('https');
 const http = require('http');
+const { createWorker } = require('tesseract.js');
 const {
   ActionRowBuilder,
   ButtonBuilder,
@@ -127,42 +128,132 @@ function downloadImage(url, dest) {
   });
 }
 
-function verifyScreenshot(shotPath, user, ytChannel) {
-  return new Promise((resolve) => {
-    const pyScript = path.join(__dirname, '..', 'sub', 'verify.py');
-    const dbPath = path.join(__dirname, '..', '..', 'data', 'subverify_seen.json');
-    const args = [pyScript, shotPath, user, '--channel', ytChannel, '--json'];
+let ocrWorker = null;
+let ocrInitPromise = null;
 
-    const env = { ...process.env, SUBVERIFY_DB: dbPath };
-    const proc = spawn('python3', args, { env });
-
-    let stdout = '';
-    let stderr = '';
-
-    proc.stdout.on('data', (d) => { stdout += d.toString(); });
-    proc.stderr.on('data', (d) => { stderr += d.toString(); });
-
-    proc.on('close', (code) => {
+async function getOcrWorker() {
+  if (ocrWorker) return ocrWorker;
+  if (!ocrInitPromise) {
+    ocrInitPromise = (async () => {
       try {
-        const lines = stdout.trim().split('\n');
-        const jsonLine = lines[lines.length - 1];
-        const parsed = JSON.parse(jsonLine);
-        resolve(parsed);
-      } catch (err) {
-        resolve({
-          ok: false,
-          message: stdout.trim() || stderr.trim() || `Process exited with code ${code}`,
+        const localLangDir = path.join(__dirname, '..', '..');
+        const worker = await createWorker('eng', 1, {
+          langPath: localLangDir,
+          gzip: false,
         });
+        ocrWorker = worker;
+        return worker;
+      } catch (err) {
+        // Fallback to default fetch if local traineddata path fails
+        const worker = await createWorker('eng');
+        ocrWorker = worker;
+        return worker;
+      } finally {
+        ocrInitPromise = null;
       }
-    });
+    })();
+  }
+  return ocrInitPromise;
+}
 
-    proc.on('error', (err) => {
-      resolve({
+function levenshtein(a, b) {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  const v0 = new Array(b.length + 1);
+  const v1 = new Array(b.length + 1);
+  for (let i = 0; i <= b.length; i++) v0[i] = i;
+  for (let i = 0; i < a.length; i++) {
+    v1[0] = i + 1;
+    for (let j = 0; j < b.length; j++) {
+      const cost = a[i] === b[j] ? 0 : 1;
+      v1[j + 1] = Math.min(v1[j] + 1, v0[j + 1] + 1, v0[j] + cost);
+    }
+    for (let j = 0; j <= b.length; j++) v0[j] = v1[j];
+  }
+  return v1[b.length];
+}
+
+function norm(s) {
+  return String(s || '').toLowerCase().replace(/0/g, 'o').replace(/[^a-z0-9]/g, '');
+}
+
+function simRatio(a, b) {
+  if (!a || !b) return 0;
+  const maxLen = Math.max(a.length, b.length);
+  return 1 - (levenshtein(a, b) / maxLen);
+}
+
+async function verifyScreenshot(shotPath, user, ytChannel) {
+  const dbPath = path.join(__dirname, '..', '..', 'data', 'subverify_seen.json');
+  let db = { sha: {} };
+  try {
+    if (fs.existsSync(dbPath)) {
+      db = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+      if (!db.sha) db.sha = {};
+    }
+  } catch {}
+
+  // 1. Fast SHA-256 duplicate check
+  try {
+    const fileBuf = fs.readFileSync(shotPath);
+    const sha = crypto.createHash('sha256').update(fileBuf).digest('hex');
+    if (db.sha && db.sha[sha]) {
+      return {
         ok: false,
-        message: `Failed to spawn verification worker: ${err.message}`,
-      });
-    });
-  });
+        message: `⚠️ Exact same screenshot was already submitted by another user.`,
+      };
+    }
+
+    // 2. OCR using Tesseract.js
+    const worker = await getOcrWorker();
+    const ret = await worker.recognize(shotPath);
+    const text = ret?.data?.text || '';
+
+    // 3. Target channel matching
+    const target = norm(ytChannel);
+    const normalizedFullText = norm(text);
+    const words = text.split(/\s+/).map(norm).filter(Boolean);
+
+    const channelFound = normalizedFullText.includes(target) ||
+                         words.some((w) => simRatio(w, target) >= 0.8);
+
+    if (!channelFound) {
+      return {
+        ok: false,
+        message: `❌ Channel '${ytChannel}' not found in screenshot.`,
+      };
+    }
+
+    // 4. Subscribed check
+    const isSubscribed = /\bsubscribed\b/i.test(text) ||
+                         normalizedFullText.includes('subscribed') ||
+                         words.some((w) => simRatio(w, 'subscribed') >= 0.85);
+
+    if (!isSubscribed) {
+      return {
+        ok: false,
+        message: '❌ "Subscribed" status not found in screenshot.',
+      };
+    }
+
+    // 5. Save seen hash
+    try {
+      db.sha[sha] = user;
+      fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+      fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
+    } catch {}
+
+    return {
+      ok: true,
+      message: 'Subscribed, unique',
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      message: `OCR Processing Error: ${err.message}`,
+    };
+  }
 }
 
 function stickyEmbed(c) {
