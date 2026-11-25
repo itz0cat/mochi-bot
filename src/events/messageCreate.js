@@ -7,6 +7,7 @@ const { defaultPrefix } = require('../config');
 const { db, kv } = require('../core/db');
 const { fillTemplate, truncate, fmtDuration, ts } = require('../core/util');
 const automod = require('../core/automod');
+const subverify = require('../core/subverify');
 const ui = require('../core/ui');
 
 const cooldown = new Map();      // key -> last time (autoresponders, afk notices, highlights)
@@ -122,6 +123,7 @@ module.exports = {
       await highlights(message);
       await autoresponders(message);
       sticky(message);
+      await subverify.handleMessage(client, message);
     }
     await prefixCommand(client, message);
   },

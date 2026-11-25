@@ -41,12 +41,12 @@ for (const f of fs.readdirSync(evDir).filter((x) => x.endsWith('.js'))) {
 process.on('unhandledRejection', (err) => console.error('[unhandledRejection]', err));
 process.on('uncaughtException', (err) => console.error('[uncaughtException]', err));
 
-// Start CatAfk 24/7 background worker
-try {
-  const catafk = require('./src/catafk');
-  catafk.start();
-} catch (err) {
-  console.error('[catafk] Failed to start:', err);
-}
+// CatAfk disabled per request
+// try {
+//   const catafk = require('./src/catafk');
+//   catafk.start();
+// } catch (err) {
+//   console.error('[catafk] Failed to start:', err);
+// }
 
 client.login(process.env.TOKEN);
